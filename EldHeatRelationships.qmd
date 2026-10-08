@@ -1,0 +1,214 @@
+---
+title: "Elderly Heat Relationships"
+format: html
+editor: visual
+editor_options:
+  markdown:
+    wrap: sentence
+execute:
+  echo: false      # hides the code
+  warning: false   # hides warnings
+  message: false   # hides package-loading messages
+  output: false    # hides printed output and plots
+---
+
+## Set up
+
+### Install packages
+
+Copy and paste to console:
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman", repos = "https://cloud.r-project.org") pacman::p_load(tidyverse, sf, tigris, cowplot) options(tigris_use_cache = TRUE)
+
+### Install libraries
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tigris)
+options(tigris_use_cache = TRUE)  # saves downloads so renders are fast
+library(cowplot)
+```
+
+### Read data
+
+```{r}
+eh <- read.csv("data/elderlyheat.csv")
+```
+
+```{r}
+names(eh)
+```
+
+## Wrangle
+
+### Select only variable needed
+
+```{r}
+eh1 <- eh |> select(1, 2, 9, 29)
+```
+
+### Rename variables
+
+```{r}
+eh1 <- eh1 |> rename(id = 1, GEOID = 2, pop65 = 3, heatwaves = 4)
+```
+
+```{r}
+names(eh1)
+```
+
+### Make GEOID text 11 characters (for join)
+
+```{r}
+eh1 <- eh1 |>
+  mutate(GEOID = str_pad(as.character(GEOID), 11, pad = "0"))
+```
+
+```{r}
+str(eh1)
+```
+
+## Retrieve County and Census tract polygons
+
+```{r}
+library(sf)
+library(tigris)
+options(tigris_use_cache = TRUE)  # saves downloads so renders are fast
+
+# County outline
+county <- counties(state = "CA", cb = TRUE, year = 2023) |>
+  filter(NAME == "Santa Clara")
+
+# Census tracts in Santa Clara County (best for a pop65 x heatwaves map)
+tracts_sc <- tracts(state = "CA", county = "Santa Clara", cb = TRUE, year = 2023)
+
+plot(st_geometry(tracts_sc))
+```
+
+### Join data to census tracts
+
+```{r}
+
+# 1. Join your data (needs a GEOID column matching the tracts)
+areas <- tracts_sc |>
+  left_join(eh1, by = "GEOID")
+
+# 2. Check the join worked: these counts should be near zero
+sum(is.na(areas$pop65))
+sum(is.na(areas$heatwaves))
+
+
+```
+
+## Create map and legend
+
+```{r}
+#use this code if quantile classificaion is desired.
+#quantile(areas$pop65, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+#quantile(areas$heatwaves, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+
+```
+
+```{r}
+#| output: true
+#| echo: true
+
+library(tidyverse)
+library(sf)
+library(cowplot)
+
+
+# 1. Classify with your own breaks (2 classes each)
+areas <- areas |>
+  mutate(
+    pop65_c = cut(pop65, breaks = c(0, 1000, 2916),
+                  labels = 1:2, include.lowest = TRUE),
+    heat_c  = cut(heatwaves, breaks = c(57, 100, 111),
+                  labels = 1:2, include.lowest = TRUE),
+    bi_class = paste(pop65_c, heat_c, sep = "-")
+  )
+
+# 2. Palette: x = pop65 (blue), y = heatwaves (red), both high = dark purple
+pal2 <- c(
+  "1-1" = "#e8e8e8",   # low pop65, low heatwaves
+  "2-1" = "#4a90c9",   # high pop65, low heatwaves (blue)
+  "1-2" = "#e0605a",   # low pop65, high heatwaves (red)
+  "2-2" = "#6a2c5a"    # high on both
+)
+
+# 3. Map
+map <- ggplot(areas) +
+  geom_sf(aes(fill = bi_class), color = "white", linewidth = 0.1,
+          show.legend = FALSE) +
+  scale_fill_manual(values = pal2, na.value = "grey80") +
+  theme_void()
+
+# 4. Diamond legend, drawn directly (no rotation needed)
+tiles <- expand_grid(x = 1:2, y = 1:2) |>
+  mutate(class = paste(x, y, sep = "-"))
+
+# Four corner points of each tile, then rotated 45 degrees:
+# X = x - y, Y = x + y
+offs <- tibble(dx = c(-.5, .5, .5, -.5),
+               dy = c(-.5, -.5, .5, .5),
+               ord = 1:4)
+
+diamond <- tiles |>
+  cross_join(offs) |>
+  mutate(X = (x + dx) - (y + dy),
+         Y = (x + dx) + (y + dy)) |>
+  arrange(class, ord)
+
+legend <- ggplot() +
+  geom_polygon(data = diamond, aes(X, Y, group = class, fill = class),
+               color = "white", linewidth = 0.6) +
+  scale_fill_manual(values = pal2, guide = "none") +
+  
+  # Corner labels (pop65, heatwaves)
+  annotate("text", x = 0,     y = 0.55, label = "Low, Low",   size = 3, fontface = "bold") +
+  annotate("text", x = 0,     y = 5.45, label = "High, High", size = 3, fontface = "bold") +
+  annotate("text", x = 2.15,  y = 3,    label = "High, Low",  size = 3, fontface = "bold", hjust = 0) +
+  annotate("text", x = -2.15, y = 3,    label = "Low, High",  size = 3, fontface = "bold", hjust = 1) +
+  
+  # Axis titles along the lower edges
+  annotate("text", x = 1.5,  y = 1.5, label = "Population 65+",
+           angle = 45,  size = 3.2) +
+  annotate("text", x = -1.5, y = 1.5, label = "Heatwaves",
+           angle = -45, size = 3.2) +
+  
+  coord_fixed(xlim = c(-4, 4), ylim = c(0, 6), clip = "off") +
+  theme_void()
+
+# 5. Combine
+ggdraw() +
+  draw_plot(map, 0, 0, 1, 1) +
+  draw_plot(legend, x = 0.01, y = 0.01, width = 0.4, height = 0.4)
+```
+
+**How to read it**
+
+- Each corner label reads (pop65, heatwaves).
+  The top point is High, High (dark purple), the bottom is Low, Low (gray), the right is High, Low (blue), and the left is Low, High (red).
+
+- “Population 65+” runs along the lower-right edge, the side that moves from low to high pop65.
+  “Heatwaves” runs along the lower-left edge, which moves from low to high heatwaves.
+
+**Adjustments**
+
+- **More room for the titles:** move them outward by changing their `x`/`y`, for example `x = 1.7, y = 1.3` and `x = -1.7, y = 1.3`.
+  Or widen the plot limits to `xlim = c(-4.5, 4.5)`.
+
+- **Bigger or smaller legend:** change `width` and `height` in `draw_plot()`.
+  Keep them equal for an 8x6 figure, which preserves the legend’s shape.
+
+- **Text size:** adjust `size = 3` on the corner labels.
+  ggplot sizes are in mm, so 3 is about 8.5 pt.
+
+- **Position:** change `x` and `y` in `draw_plot()`.
+  For example, `x = 0.58, y = 0.01` moves the legend to the lower right.
+
+  #### Note:
+
+- This uses `cross_join()`, which needs dplyr 1.1.0 or newer.
+  If you get an error, run `update.packages("dplyr")`.
